@@ -1,4 +1,5 @@
 // Got code from https://github.com/sipsorcery/mediafoundationsamples/blob/master/MFCaptureRawFramesToFile/MFCaptureRawFramesToFile.cpp
+// and https://github.com/sipsorcery/mediafoundationsamples/blob/master/MFWebCamToFile/MFWebCamToFile.cpp
 
 #include <iostream>
 #include <fstream>
@@ -7,6 +8,8 @@
 #include <mferror.h>
 #include <mfreadwrite.h>
 #include <wmsdkidl.h>
+#include <wmcodecdsp.h>
+#include <codecapi.h>
 
 #include "utility.h"
 
@@ -17,8 +20,9 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "wmcodecdspuuid.lib")
 
-#define FILENAME "output.yuv"
+#define FILENAME L"output.mp4"
 #define SAMPLE_COUNT 100
+#define FRAME_RATE 30
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 480
 
@@ -36,11 +40,13 @@ int main() {
     UINT webcamNameLength = 0;
 
     IMFSample *videoSample = NULL;
+    DWORD videoStreamIndex;
     DWORD streamIndex, flags;
-    LONGLONG llVideoTimestamp, llSampleDuration;
+    LONGLONG llVideoTimestamp, llVideoBaseTime;
     int sampleCount = 0;
+    IMFSinkWriter *pWriter = NULL;
 
-    std::ofstream outputBuffer(FILENAME, std::ios::out | std::ios::binary);
+//    std::ofstream outputBuffer(FILENAME, std::ios::out | std::ios::binary);
 
     CHECK_HR(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE), "COM init failed");
     CHECK_HR(MFStartup(MF_VERSION), "Start up failed");
@@ -56,15 +62,45 @@ int main() {
     CHECK_HR(MFCreateMediaType(&pSrcOutMediaType), "Failed to create media type");
     // TODO: set to image
     CHECK_HR(pSrcOutMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video), "failed to set major type");
-    CHECK_HR(pSrcOutMediaType->SetGUID(MF_MT_SUBTYPE, WMMEDIASUBTYPE_YUY2), "failed to set subtype");
+    CHECK_HR(pSrcOutMediaType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_YUY2), "failed to set subtype");
+    CHECK_HR(MFSetAttributeRatio(pSrcOutMediaType, MF_MT_FRAME_RATE, FRAME_RATE, 1), "Could not set ratio");
     CHECK_HR(MFSetAttributeSize(pSrcOutMediaType, MF_MT_FRAME_SIZE, FRAME_WIDTH, FRAME_HEIGHT), "Failed to set size");
     CHECK_HR(videoReader->SetCurrentMediaType(0, NULL, pSrcOutMediaType), "failed to set source reader media type");
-    std::cout << "Reading video samples from webcam" << std::endl;
+    CHECK_HR(MFCreateSinkWriterFromURL(
+        FILENAME,
+        NULL,
+        NULL,
+        &pWriter), "Error creating writer");
+
+    // I have no clue what this function does
+    CHECK_HR(MFTRegisterLocalByCLSID(
+        __uuidof(CColorConvertDMO),
+        MFT_CATEGORY_VIDEO_PROCESSOR,
+        L"",
+        MFT_ENUM_FLAG_SYNCMFT,
+        0,
+        NULL,
+        0,
+        NULL
+        ), "Error registering color converted");
+
+    CHECK_HR(MFCreateMediaType(&videoSourceOutputType), "failed to create vid src out type");
+    CHECK_HR(pSrcOutMediaType->CopyAllItems(videoSourceOutputType), "Error copying all items over");
+    CHECK_HR(videoSourceOutputType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264), "failed to set out video format");
+    CHECK_HR(videoSourceOutputType->SetUINT32(MF_MT_AVG_BITRATE, 240'000), "Error setting average bitrate");
+    CHECK_HR(videoSourceOutputType->SetUINT32(MF_MT_INTERLACE_MODE, 2), "Error setting interlace mode");
+    CHECK_HR(MFSetAttributeRatio(videoSourceOutputType, MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base, 1), "Failed to set profile");
+
+    CHECK_HR(pWriter->AddStream(videoSourceOutputType, &videoStreamIndex), "failed to add stream");
+    CHECK_HR(pWriter->SetInputMediaType(videoStreamIndex, pSrcOutMediaType, NULL), "Error setting input type");
+    CHECK_HR(pWriter->BeginWriting(), "failed to begin writing");
+
+    std::cout << "Recording" << std::endl;
 
     while (sampleCount <= SAMPLE_COUNT)
     {
         CHECK_HR(videoReader->ReadSample(
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MF_SOURCE_READER_ANY_STREAM,
             0,
             &streamIndex,
             &flags,
@@ -72,43 +108,25 @@ int main() {
             &videoSample
             ), "Error reading video sample");
 
-        if (flags & MF_SOURCE_READERF_STREAMTICK) {
-            std::cout << "Stream tick" << std::endl;
-        }
-
         if (videoSample) {
-            std::cout << "Writing sample " << sampleCount << std::endl;
-            CHECK_HR(videoSample->SetSampleTime(llVideoTimestamp), "Error setting video sample time");
-            CHECK_HR(videoSample->SetSampleDuration(llSampleDuration), "Error setting video sample duration");
+            llVideoTimestamp -= llVideoBaseTime;
+            CHECK_HR(videoSample->SetSampleTime(llVideoTimestamp), "Set video sample time failed");
+            CHECK_HR(pWriter->WriteSample(videoStreamIndex, videoSample), "Write video sample failed");
 
-            IMFMediaBuffer *buffer = NULL;
-            DWORD bufferLength;
-            CHECK_HR(videoSample->ConvertToContiguousBuffer(&buffer), "ConvertToContiguousBuffer failed");
-            CHECK_HR(buffer->GetCurrentLength(&bufferLength), "Get buffer length failed");
-
-            std::cout << "Sample length " << bufferLength << std::endl;
-
-            byte *byteBuffer;
-            DWORD buffCurrLen = 0;
-            DWORD buffMaxLen = 0;
-            CHECK_HR(buffer->Lock(&byteBuffer, &buffMaxLen, &buffCurrLen), "Failed to lock buffer");
-
-            outputBuffer.write((char *) byteBuffer, bufferLength);
-            CHECK_HR(buffer->Unlock(), "Failed to unlock buffer");
-
-            buffer->Release();
-            videoSample->Release();
+            SAFE_RELEASE(&videoSample);
         }
 
         sampleCount++;
     }
 
-    outputBuffer.close();
+    if (pWriter) {
+        CHECK_HR(pWriter->Finalize(), "Error finalizing");
+    }
 
 done:
 
     std::cout << "Finished" << std::endl;
-    int c = getchar();
+//    int c = getchar();
 
     SAFE_RELEASE(videoSource);
     SAFE_RELEASE(videoConfig);
@@ -116,34 +134,6 @@ done:
     SAFE_RELEASE(videoReader);
     SAFE_RELEASE(videoSourceOutputType);
     SAFE_RELEASE(pSrcOutMediaType);
-    /*
-    IMFMediaSource *ppSource;
-    HRESULT hr = CreateVideoCaptureDevice(&ppSource);
-    if (!SUCCEEDED(hr)) {
-        std::cerr << "Could not create video capture device" << std::endl;
-        return 1;
-    }
-
-    IMFPresentationDescriptor *presentationDescriptor;
-    ppSource->CreatePresentationDescriptor(&presentationDescriptor);
-    PROPVARIANT propvariant;
-    PropVariantInit(&propvariant);
-    propvariant.vt = VT_EMPTY;
-    ppSource->Start(
-        presentationDescriptor,
-        NULL,
-        &propvariant
-    );
-
-    std::getchar();
-
-    if (ppSource) {
-        ppSource->Shutdown();
-        ppSource->Release();
-        PropVariantClear(&propvariant);
-        ppSource = NULL;
-    }
-     */
 
     return 0;
 }
