@@ -20,13 +20,16 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "wmcodecdspuuid.lib")
 
-#define FILENAME L"output.mp4"
+#define FILENAME L"output.yuv"
+// #define FILENAME L"output.mp4"
 #define SAMPLE_COUNT 100
 #define FRAME_RATE 30
 #define FRAME_WIDTH 640
 #define FRAME_HEIGHT 480
 
 #define WEBCAM_INDEX 0
+
+#define RAW_FRAMES 1
 
 int main() {
     IMFMediaSource* videoSource = NULL;
@@ -46,7 +49,9 @@ int main() {
     int sampleCount = 0;
     IMFSinkWriter *pWriter = NULL;
 
-//    std::ofstream outputBuffer(FILENAME, std::ios::out | std::ios::binary);
+#if RAW_FRAMES
+    std::ofstream outputBuffer(FILENAME, std::ios::out | std::ios::binary);
+#endif
 
     CHECK_HR(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE), "COM init failed");
     CHECK_HR(MFStartup(MF_VERSION), "Start up failed");
@@ -66,6 +71,7 @@ int main() {
     CHECK_HR(MFSetAttributeRatio(pSrcOutMediaType, MF_MT_FRAME_RATE, FRAME_RATE, 1), "Could not set ratio");
     CHECK_HR(MFSetAttributeSize(pSrcOutMediaType, MF_MT_FRAME_SIZE, FRAME_WIDTH, FRAME_HEIGHT), "Failed to set size");
     CHECK_HR(videoReader->SetCurrentMediaType(0, NULL, pSrcOutMediaType), "failed to set source reader media type");
+#if !RAW_FRAMES
     CHECK_HR(MFCreateSinkWriterFromURL(
         FILENAME,
         NULL,
@@ -122,6 +128,57 @@ int main() {
     if (pWriter) {
         CHECK_HR(pWriter->Finalize(), "Error finalizing");
     }
+#else
+    LONGLONG llVideoTimeStamp, llSampleDuration;
+
+    while (sampleCount <= SAMPLE_COUNT)
+    {
+        CHECK_HR(videoReader->ReadSample(
+            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            0,                              // Flags.
+            &streamIndex,                   // Receives the actual stream index.
+            &flags,                         // Receives status flags.
+            &llVideoTimeStamp,              // Receives the time stamp.
+            &videoSample                    // Receives the sample or NULL.
+            ), "Error reading video sample.");
+
+        if (flags & MF_SOURCE_READERF_STREAMTICK)
+        {
+            printf("Stream tick.\n");
+        }
+
+        if (videoSample)
+        {
+            printf("Writing sample %i.\n", sampleCount);
+
+            CHECK_HR(videoSample->SetSampleTime(llVideoTimeStamp), "Error setting the video sample time.");
+            CHECK_HR(videoSample->GetSampleDuration(&llSampleDuration), "Error getting video sample duration.");
+
+            IMFMediaBuffer *buf = NULL;
+            DWORD bufLength;
+            CHECK_HR(videoSample->ConvertToContiguousBuffer(&buf), "ConvertToContiguousBuffer failed.");
+            CHECK_HR(buf->GetCurrentLength(&bufLength), "Get buffer length failed.");
+
+            printf("Sample length %lu.\n", bufLength);
+
+            byte *byteBuffer;
+            DWORD buffCurrLen = 0;
+            DWORD buffMaxLen = 0;
+            CHECK_HR(buf->Lock(&byteBuffer, &buffMaxLen, &buffCurrLen), "Failed to lock video sample buffer.");
+
+            outputBuffer.write((char *)byteBuffer, bufLength);
+
+            CHECK_HR(buf->Unlock(), "Failed to unlock video sample buffer.");
+
+            buf->Release();
+            videoSample->Release();
+        }
+
+        sampleCount++;
+    }
+
+    outputBuffer.close();
+#endif
 
 done:
 

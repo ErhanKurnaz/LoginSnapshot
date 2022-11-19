@@ -433,7 +433,7 @@ std::string GetMediaTypeDescription(IMFMediaType* pMediaType)
 
 std::string GetVideoTypeDescriptionBrief(IMFMediaType* pMediaType)
 {
-#define CHECK_HR(hr, msg) if(!SUCCEEDED(hr)) { fprintf(stderr, msg); fprintf(stderr, "\n"); fprintf(stderr, "Error code: %.2X\n", (hr)); goto done; }
+#define CHECK_HR(hr, msg) if(!SUCCEEDED(hr)) { fprintf(stderr, msg); fprintf(stderr, "\n"); fprintf(stderr, "Error code: %.2lX\n", (hr)); goto done; }
 
     std::string description = " ";
     GUID subType;
